@@ -238,7 +238,11 @@ func TestClaude_ServerErrorIsTransient(t *testing.T) {
 }
 
 func TestClaude_NoAPIKeyIsPermanent(t *testing.T) {
-	// Don't set ANTHROPIC_API_KEY and don't pass WithAPIKey.
+	// Make sure no key is in the environment for this test, regardless of
+	// what the developer's shell has. t.Setenv restores the prior value
+	// when the test completes.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
 	arrow := Claude("claude-test", WithAPIBase("http://nope"))
 	_, err := arrow(context.Background(), Prompt{Messages: []Message{UserText("x")}})
 	if err == nil {
