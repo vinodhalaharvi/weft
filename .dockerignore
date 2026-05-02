@@ -1,0 +1,21 @@
+# Build artifacts that don't belong in the image.
+coverage.out
+coverage.html
+
+# Editor scratch.
+*.swp
+.vscode/
+.idea/
+
+# Git metadata is large and not needed for builds.
+.git/
+.gitignore
+
+# OS junk.
+.DS_Store
+Thumbs.db
+
+# Don't recursively COPY the build context if it ends up here somehow.
+Dockerfile
+docker-compose.yml
+.dockerignore

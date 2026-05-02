@@ -1,0 +1,28 @@
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+.envrc
+*.pem
+*.key
+*_rsa
+*_ed25519
+secrets/
+credentials.json
+
+# Build artifacts
+coverage.out
+coverage.html
+*.exe
+*.test
+
+# Editor / OS junk
+*.swp
+*.swo
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/

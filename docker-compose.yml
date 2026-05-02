@@ -1,0 +1,69 @@
+# docker-compose.yml — minimal compose for running weft in containers.
+#
+# Services:
+#   ci   — runs `make all` and exits. For local-CI-style verification.
+#   dev  — long-running interactive container with Claude Code installed.
+#          Bind-mounts your source so edits are reflected immediately
+#          without rebuilding the image.
+#
+# Usage:
+#   docker compose run --rm ci                       # run the test suite
+#   docker compose up -d dev                          # start dev container
+#   docker compose exec dev bash                      # shell into it
+#   docker compose exec dev make test                 # run tests inside
+#   docker compose exec dev claude mcp serve          # run Claude Code as an MCP server
+#   docker compose down                               # stop everything
+
+services:
+
+  # CI service: build, test, exit. No volumes, no daemons, no Claude.
+  # Useful for "does the code pass on a clean machine" checks.
+  ci:
+    build:
+      context: .
+      target: ci
+    # Default CMD from the Dockerfile is `make all`; override here if
+    # you want a different target (e.g., `make test-race`).
+    command: make all
+
+  # Dev service: long-running with Claude Code, MCP servers, and the
+  # full toolbox. Bind-mounts the source for live editing.
+  dev:
+    build:
+      context: .
+      target: dev
+    # Keep the container alive so we can exec into it.
+    command: tail -f /dev/null
+    volumes:
+      # Bind-mount the source so changes on the host are visible inside.
+      # The :delegated mode is a macOS perf hint; harmless on Linux.
+      - .:/workspace:delegated
+      # Persist the Go module cache between runs to avoid redownloads.
+      - go-mod-cache:/home/dev/go/pkg/mod
+      # Persist the Go build cache.
+      - go-build-cache:/home/dev/.cache/go-build
+      # Persist npm's global module cache so MCP server installs survive
+      # container recreation.
+      - npm-cache:/home/dev/.npm
+    environment:
+      # Claude Code reads ANTHROPIC_API_KEY for auth. Pass through from
+      # the host shell. Set it on the host or in a .env file next to
+      # this compose file.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Some MCP servers want a GitHub token.
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Force colored output for a nicer interactive shell.
+      - TERM=xterm-256color
+    # Expose ports if you run MCP servers over HTTP from inside the
+    # container and want to hit them from the host. Adjust as needed.
+    ports:
+      - "9000:9000"  # generic MCP HTTP port
+      - "9001:9001"  # secondary, for recursive-agent demos
+    # tty + stdin_open so an exec'd shell behaves correctly.
+    tty: true
+    stdin_open: true
+
+volumes:
+  go-mod-cache:
+  go-build-cache:
+  npm-cache:
