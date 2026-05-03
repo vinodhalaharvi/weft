@@ -333,79 +333,67 @@ shape is the contract for every LLM provider. When `OpenAI(...)` and
 
 ---
 
-## Package `codegen` — directory-wide LLM transformations
+## Package `mcp` — lift MCP tools in/out of the arrow algebra
 
-### Domain types
-
-```go
-type Job struct {
-    Dir      string   // root directory
-    Patterns []string // globs to include (e.g., "**/*.go")
-    Skip     []string // globs to exclude
-    Prompt   string   // instruction applied to each file
-    DryRun   bool     // produce diffs without writing
-}
-
-type File struct {
-    Path    string
-    RelPath string
-    Content string
-}
-
-type Edit struct {
-    File        File
-    NewContent  string
-    Explanation string
-}
-
-type FileResult struct {
-    Path        string
-    RelPath     string
-    Wrote       bool
-    Unchanged   bool
-    Diff        string
-    Explanation string
-    Err         error
-}
-```
-
-### The transformer slot
+### Lift in: remote MCP tool → typed weft.Arrow
 
 ```go
-type TransformReq struct {
-    File   File
-    Prompt string
-}
+type Client struct { /* ... */ }
 
-type TransformResp struct {
-    NewContent  string
-    Explanation string
-}
+func Stdio(command string, args ...string) (Transport, error)
+func Connect(ctx context.Context, t Transport) (*Client, error)
+func (c *Client) Tools() []string
+func (c *Client) Close() error
 
-type Transformer = weft.Arrow[TransformReq, TransformResp]
+func Tool[In, Out any](c *Client, name string) weft.Arrow[In, Out]
 ```
 
-Note the type alias: a `Transformer` is just `weft.Arrow[TransformReq, TransformResp]`.
-You can plug in *any* arrow of that shape — a stub for tests, an LLM-backed
-pipeline, a deterministic rule-based transformer, an ensemble of all three.
+`mcp.Tool[A, B](client, name)` is the headline lift-in. It returns a
+`weft.Arrow[A, B]` that, when called, marshals `A` to JSON args, sends
+a `tools/call` over the transport, parses the result back to `B`, and
+returns it. From the caller's perspective it's just an arrow — same
+shape as `llm.Claude` or `weft.Pure`, composes the same way.
 
-### Stages, each independently usable
+### Lift out: typed weft.Arrow → MCP tool
 
 ```go
-func Enumerate()                weft.Arrow[Job, []File]
-func Apply(t Transformer, prompt string) weft.Arrow[File, Edit]
-func WriteOrDiff(dryRun bool)   weft.Arrow[Edit, FileResult]
+type ErasedTool struct {
+    Info    ToolInfo
+    Handler func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error)
+}
 
-func Pipeline(
-    transformer Transformer,
-    concurrency int,
-    policy weft.ErrorPolicy,
-) weft.Arrow[Job, []FileResult]
+type Server struct { /* ... */ }
+
+func ServeAsTool[In, Out any](
+    name string,
+    arrow weft.Arrow[In, Out],
+    opts ...ServeOption,
+) ErasedTool
+
+func Serve(entries ...ErasedTool) *Server
+func RunStdioServer(server *Server, opts ...StdioServerOption) error
 ```
 
-`Pipeline` is what most callers use: enumerate + apply + write, all wrapped
-together with bounded concurrency. The individual stages are exported so you
-can mix-and-match.
+`ServeAsTool[A, B](name, myArrow)` is the headline lift-out. It takes
+any typed arrow and packages it as a JSON-shaped tool that external
+MCP clients can call. Combined with `Serve` and `RunStdioServer`, you
+get a real stdio MCP server with one or more tools, where each tool's
+implementation is a composed weft pipeline.
+
+### Transports
+
+```go
+type Transport interface { /* ... */ }
+
+func InMemory(server *Server) Transport
+func Stdio(command string, args ...string) (Transport, error)
+```
+
+Two transports ship: `InMemory` for in-process round-trips (used by
+the functor-laws property test in `mcp_test.go`), and `Stdio` for
+real subprocess MCP servers, which wraps `mark3labs/mcp-go`'s stdio
+client. The `Transport` interface is open — adding HTTP/SSE later is
+a contained addition.
 
 ---
 
@@ -413,30 +401,34 @@ can mix-and-match.
 
 ```
                           ┌──────────────────────────────────┐
-   Application code  ───► │  codegen.Pipeline(...)           │  ← top-level pipeline
+   Application code  ───► │  llm.Loop(claude, tools)         │  ← agent loop
                           └──────────────────────────────────┘
                                        │
-                                       │ takes a Transformer (= weft.Arrow)
+                                       │ tools come from anywhere
                                        ▼
                           ┌──────────────────────────────────┐
-        Provider seam ──► │  weft.Pipe3(format, Claude, parse) │
-                          └──────────────────────────────────┘
-                                       │
-                                       │ middle stage is the LLM call
-                                       ▼
-                          ┌──────────────────────────────────┐
-        LLM API call  ──► │  llm.Claude(model)                │  ← Arrow[Prompt, Response]
+       MCP lift-in   ───► │  mcp.Tool[A, B](client, name)    │
                           └──────────────────────────────────┘
                                        │
                                        │ wrapped optionally with transforms
                                        ▼
                           ┌──────────────────────────────────┐
-        Cross-cutting ──► │  weft.WithRetry, WithTimeout, ... │
+       Cross-cutting ───► │  weft.WithRetry, WithTimeout, …  │
+                          └──────────────────────────────────┘
+
+   At any point, the composed arrow can flow back out:
+
+                          ┌──────────────────────────────────┐
+       MCP lift-out  ───► │  mcp.ServeAsTool(name, myArrow)  │  ← exposed as MCP tool
                           └──────────────────────────────────┘
 ```
 
 Every arrow at every level has the same shape: `func(ctx, In) (Out, error)`.
-That uniformity is what lets you swap any layer without touching the others.
+That uniformity is what lets you swap any layer without touching the
+others — and it lets you compose a tool from one MCP server with a
+tool from a different MCP server, plus pure Go logic, into a new tool
+that you re-expose as a third MCP server. The `multi-source-server`
+example demonstrates exactly this.
 
 ---
 
@@ -445,9 +437,9 @@ That uniformity is what lets you swap any layer without touching the others.
 | Package    | Public functions | Public types | Lines (impl) |
 |------------|------------------|--------------|--------------|
 | `weft`     | 27               | 8            | ~700         |
-| `llm`      | 7                | 13           | ~450         |
-| `codegen`  | 4                | 7            | ~250         |
-| **Total**  | **38**           | **28**       | **~1,400**   |
+| `llm`      | 9                | 13           | ~700         |
+| `mcp`      | 11               | 6            | ~600         |
+| **Total**  | **47**           | **27**       | **~2,000**   |
 
-Plus ~1,200 lines of tests across 74 test functions. The whole framework is
-small enough to read in an afternoon.
+Plus ~2,000 lines of tests across 83 test functions. The whole framework
+is still small enough to read in an afternoon.

@@ -1,11 +1,12 @@
 package llm_test
 
 // This file demonstrates the full composition story end-to-end:
-// codegen-shaped pipeline → custom transformer → llm.Claude arrow → mock API.
+// multi-stage typed pipeline → llm.Claude arrow → mock Anthropic API.
 //
-// We intentionally don't import the codegen package here (to avoid an import
-// cycle through tests), but we mirror its shape: a per-item arrow that takes
-// a typed request and returns a typed response, composed with weft.Traverse.
+// The shape is generic — a per-item arrow that takes a typed request
+// and returns a typed response, composed with weft.Traverse — and
+// covers any "transform a batch of items via an LLM with retry and
+// bounded concurrency" pattern.
 
 import (
 	"context"
@@ -33,8 +34,8 @@ type fileResp struct {
 	Explanation string
 }
 
-// TestFullPipeline_LLMTransformerWithRetryAndTraverse exercises the
-// composition that codegen.Pipeline uses:
+// TestFullPipeline_LLMTransformerWithRetryAndTraverse exercises a
+// realistic multi-file pipeline:
 //
 //	Traverse(
 //	    Pipe3(formatPrompt, llm.Claude, parseResponse)
@@ -91,7 +92,7 @@ func TestFullPipeline_LLMTransformerWithRetryAndTraverse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// === Build the per-file transformer (mirrors codegen-llm/main.go) ====
+	// === Build the per-file transformer (format prompt, call LLM, parse) ===
 	claudeArrow := llm.Claude("claude-test",
 		llm.WithAPIKey("test"),
 		llm.WithAPIBase(srv.URL),
@@ -168,7 +169,7 @@ func TestFullPipeline_LLMTransformerWithRetryAndTraverse(t *testing.T) {
 	}
 }
 
-// === Helpers (would normally live in the codegen-llm example) ================
+// === Helpers (prompt formatting and response parsing) ========================
 
 func extractPath(text string) string {
 	for _, line := range strings.Split(text, "\n") {

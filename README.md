@@ -21,15 +21,14 @@ provide.
 
 ## What you can do with it
 
-The repo contains four Go packages plus eight runnable example commands:
+The repo contains three Go packages plus eight runnable example commands:
 
 | Package      | What it provides                                       | Tests |
 |--------------|--------------------------------------------------------|------:|
 | `weft/`      | The core algebra: `Arrow`, combinators, transforms     |    47 |
 | `llm/`       | Provider-neutral LLM types, Claude HTTP arrow, `Loop`  |    24 |
 | `mcp/`       | Lift MCP tools in/out of arrow algebra; stdio + server |    12 |
-| `codegen/`   | Directory-wide LLM-driven code transformations         |    13 |
-| **Total**    |                                                        |  **96** |
+| **Total**    |                                                        |  **83** |
 
 The MCP package builds on [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go)
 for the wire protocol — weft is **complementary**, not competing. mcp-go
@@ -115,7 +114,6 @@ import (
     "github.com/vinodhalaharvi/weft/weft"
     "github.com/vinodhalaharvi/weft/llm"
     "github.com/vinodhalaharvi/weft/mcp"
-    "github.com/vinodhalaharvi/weft/codegen"
 )
 ```
 
@@ -221,68 +219,41 @@ go run ./cmd/examples/agent "How many Go files are in this repo? Use any tools y
 
 ---
 
-## Worked example: codegen across a directory
+## How the layers stack
 
-The `codegen` package applies an LLM transformation across every file
-in a directory matching a glob pattern. It exercises the full
-composition story: pure stages, an LLM call wrapped in retry and
-timeout, bounded concurrency, atomic writes with dry-run support.
-
-Without an API key (uses a deterministic stub transformer):
-
-```bash
-mkdir -p /tmp/demo
-cat > /tmp/demo/foo.go <<'EOF'
-package demo
-
-func Hello() string { return "hello" }
-EOF
-
-go run ./examples/codegen-llm \
-    -dir /tmp/demo \
-    -prompt "add a doc comment to each function" \
-    -patterns "*.go" \
-    -dry -offline
-```
-
-With a real key:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-go run ./examples/codegen-llm \
-    -dir /tmp/demo \
-    -prompt "add a one-line godoc comment to each exported function" \
-    -patterns "*.go" \
-    -dry           # always dry-run first to inspect the diff
-```
-
-### How the layers stack
-
-Codegen is composition all the way down:
+Composition is the design point. A typical pipeline looks like this:
 
 ```
-codegen.Pipeline(transformer, 4, weft.PartialResults)         ← top-level
-  └─ transformer = weft.Apply(                                  ← wrapped with
-       weft.Pipe3(formatPrompt, llm.Claude(model), parseResp),  ← composed of
-       weft.WithRetry(3, ExponentialBackoff(time.Second)),      ↓ transforms
-       weft.WithTimeout(60 * time.Second),
-       weft.WithTap(logProgress),
-     )
+weft.Traverse(                                               ← top-level: many items
+    weft.Apply(                                              ← wrap one-item arrow
+        weft.Pipe3(formatPrompt, llm.Claude(model), parse),  ← composed of three stages
+        weft.WithRetry(3, ExponentialBackoff(time.Second)),  ↓ cross-cutting transforms
+        weft.WithTimeout(60 * time.Second),
+        weft.WithTap(logProgress),
+    ),
+    weft.WithConcurrency(8),
+)
 ```
 
-Every arrow at every layer has the same type. The codegen pipeline
-doesn't know it contains an LLM call. The LLM call doesn't know it's
-wrapped in retry. Each layer only sees its argument's type contract
-— that's the role-erasure.
+Every arrow at every layer has the same type. `Traverse` doesn't know it
+contains an LLM call. The LLM call doesn't know it's wrapped in retry.
+The retry doesn't know it's running concurrently across many items.
+Each layer only sees its argument's type contract — that's the
+role-erasure.
 
 To swap providers, you change one line:
 
 ```go
-weft.Pipe3(formatPrompt, llm.Claude(model), parseResp)
+weft.Pipe3(formatPrompt, llm.Claude(model), parse)
 //                       ^^^^^^^^^^^^^^^^^
 // becomes (when implemented):
-weft.Pipe3(formatPrompt, llm.OpenAI(model), parseResp)
+weft.Pipe3(formatPrompt, llm.OpenAI(model), parse)
 ```
+
+The runnable demo of this exact pattern is
+[`cmd/examples/pipeline`](./cmd/examples/pipeline). It assesses code
+quality across a slice of snippets — different application, same
+composition machinery.
 
 ---
 
@@ -309,10 +280,10 @@ outputs flowing through cleanly.
 
 ```
 make            # build and test
-make test       # run all 96 tests
+make test       # run all 83 tests
 make test-race  # run tests with the race detector
 make laws       # run only the categorical law tests (the spec)
-make example    # run the codegen pipeline test
+make example    # run the end-to-end pipeline test
 make cover      # generate HTML coverage report
 make lint       # go vet + gofmt check
 make help       # list every target
@@ -352,12 +323,6 @@ make help       # list every target
 | `stdio.go`        | `Stdio` transport for client side; wraps `mark3labs/mcp-go` |
 | `stdio_server.go` | `RunStdioServer` — expose a weft Server as a real MCP stdio server |
 | `mcp.go`          | `Transport`, `InMemory` for in-process round-trips |
-
-### `codegen/` — directory-wide LLM transformations
-
-| File              | Provides |
-|-------------------|----------|
-| `codegen.go`      | `Pipeline`, `Enumerate`, `Apply`, `WriteOrDiff`, `Job`, `File`, `Edit`, `FileResult`, `Transformer` |
 
 ---
 

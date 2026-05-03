@@ -172,8 +172,7 @@ func assess() weft.Arrow[Snippet, Assessment] {
 // === Sample data =============================================================
 
 // snippets is a small built-in corpus so the example runs without any
-// setup. In real use you'd read these from disk via the codegen package
-// or any other source.
+// setup. In real use you'd read these from disk or another source.
 var snippets = []Snippet{
 	{
 		Filename: "good.go",
