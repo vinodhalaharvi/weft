@@ -1,48 +1,107 @@
 # weft — categorical composition primitives for Go
 
-A small Go module providing a category-theoretic algebra for composing
-LLM, MCP, and agent workflows as typed, cancellable, fallible functions.
-The central type is one line:
+A small Go module that treats every step in an LLM/MCP/agent workflow —
+pure functions, MCP tool calls, LLM invocations, agent loops, parallel
+fan-outs — as the same `Arrow[A, B]` type, and provides a coherent
+algebra for composing them. The categorical laws (identity, associativity,
+functor, product, coproduct) are verified as the package's spec via
+property-based tests.
 
 ```go
 type Arrow[A, B any] func(ctx context.Context, a A) (B, error)
 ```
 
-Every "thing that does work" — a remote API call, a local function,
-an LLM invocation, an MCP tool, a multi-step pipeline, an agent loop —
-can be expressed as an `Arrow`. Once it is, the same combinators
-(`Compose`, `Par`, `Sum`, `Map`, `Traverse`) operate uniformly on it
-without caring how it was constructed. This is the **role-erasure**
-property the package exists to provide.
+That's the central abstraction. The combinators (`Compose`, `Pipe2`–`Pipe6`,
+`Par`, `Sum`, `Map`, `Traverse`, `Apply`, `WithRetry`, `WithTimeout`,
+`WithTap`, `Loop`, …) operate uniformly on every arrow regardless of how
+it was constructed. This is the **role-erasure** the package exists to
+provide.
 
-## What's here
+---
 
-The repo contains three Go packages plus example CLIs:
+## What you can do with it
 
-| Package      | What it provides                                   | Tests |
-|--------------|----------------------------------------------------|------:|
-| `weft/`      | The core algebra: `Arrow`, combinators, transforms |    47 |
-| `llm/`       | Provider-neutral LLM types and the Claude HTTP seam |   14 |
-| `codegen/`   | Directory-wide LLM-driven code transformations      |   13 |
-| **Total**    |                                                    |  **74** |
+The repo contains four Go packages plus eight runnable example commands:
 
-The core algebra is verified against categorical laws via property-based
-tests (identity, associativity, functor laws, cancellation propagation,
-concurrency correctness in `Par` and `Traverse`). The LLM seam is
-verified against a mock Anthropic API server. The MCP functor and
-streaming arrow type are designed but not yet implemented.
+| Package      | What it provides                                       | Tests |
+|--------------|--------------------------------------------------------|------:|
+| `weft/`      | The core algebra: `Arrow`, combinators, transforms     |    47 |
+| `llm/`       | Provider-neutral LLM types, Claude HTTP arrow, `Loop`  |    24 |
+| `mcp/`       | Lift MCP tools in/out of arrow algebra; stdio + server |    12 |
+| `codegen/`   | Directory-wide LLM-driven code transformations         |    13 |
+| **Total**    |                                                        |  **96** |
 
-See [API.md](./API.md) for every exported type and function across all
-three packages, organized for at-a-glance comparison.
+The MCP package builds on [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go)
+for the wire protocol — weft is **complementary**, not competing. mcp-go
+gives you reliable JSON-RPC over stdio/SSE/HTTP; weft adds the
+categorical algebra that lets you compose lifted tools with non-MCP
+arrows uniformly, and re-expose composed arrows as new MCP servers.
+
+---
+
+## The headline demo
+
+`cmd/multi-source-server` is a real working program. It connects to two
+heterogeneous MCP servers as a client, lifts tools from each, composes
+them into new tools using weft pipelines, and re-exposes the composed
+tools as its own MCP server. Three process boundaries, two external
+systems, one program.
+
+```
+test-multi-source                      ← any MCP client (here: included verifier)
+  └─ multi-source-server (weft)        ← composes upstream tools into new ones
+       ├─ claude mcp serve             ← Claude Code's MCP tools
+       └─ npx server-filesystem        ← Official Node.js filesystem MCP
+```
+
+It exposes three composed tools: `shell_run` (delegates to Bash),
+`read_file` (delegates to filesystem), and `bash_then_save` (composes
+both — runs a shell command, parses the output, writes it to disk).
+From a calling client, `bash_then_save` looks like one tool. Internally
+it's an arrow composed of two arrows from two different subprocesses.
+
+To verify against your own machine:
+
+```bash
+# Requires `claude` (Claude Code) and `npx` available on PATH.
+go run ./cmd/test-multi-source
+```
+
+If all three subprocesses are reachable, you'll see three passing
+assertions covering both source paths and the composition.
+
+To use it from Claude Desktop, build the binary and add to your
+`claude_desktop_config.json`:
+
+```bash
+go build -o /usr/local/bin/multi-source-server ./cmd/multi-source-server
+```
+
+```json
+{
+  "mcpServers": {
+    "weft-multi": {
+      "command": "/usr/local/bin/multi-source-server",
+      "args": ["/private/tmp"]
+    }
+  }
+}
+```
+
+After restarting Claude Desktop, the three composed tools become
+available in any chat.
+
+---
 
 ## Quick start
 
-Requires Go 1.22 or later.
+Requires Go 1.23 or later (`go.mod` declares 1.23; the toolchain may
+auto-upgrade to 1.25.x to satisfy mcp-go's transitive deps).
 
 ```bash
 git clone https://github.com/vinodhalaharvi/weft.git
 cd weft
-make             # build + run all 74 tests
+make             # build + run all 96 tests
 ```
 
 Or use as a library:
@@ -55,14 +114,18 @@ go get github.com/vinodhalaharvi/weft
 import (
     "github.com/vinodhalaharvi/weft/weft"
     "github.com/vinodhalaharvi/weft/llm"
+    "github.com/vinodhalaharvi/weft/mcp"
     "github.com/vinodhalaharvi/weft/codegen"
 )
 ```
 
-### A few examples of the core algebra
+---
+
+## Examples in increasing depth
+
+### Compose pure functions and effectful arrows uniformly
 
 ```go
-// Compose pure functions and effectful arrows uniformly.
 greet := weft.Pure(func(name string) string { return "Hello, " + name })
 shout := weft.Pure(strings.ToUpper)
 loud  := weft.Compose(greet, shout)
@@ -70,13 +133,13 @@ loud  := weft.Compose(greet, shout)
 result, err := loud(ctx, "world")  // "HELLO, WORLD"
 ```
 
+### Run things in parallel, traverse a slice with bounded concurrency
+
 ```go
-// Run two arrows in parallel, get both results.
 both := weft.Par(fetchUser, fetchOrders)
 pair, err := both(ctx, userID)
 // pair.Fst is the user, pair.Snd is the orders
 
-// Process a slice with bounded concurrency, partial-results error policy.
 each := weft.Traverse(processOne,
     weft.WithConcurrency(8),
     weft.OnError(weft.PartialResults),
@@ -84,23 +147,88 @@ each := weft.Traverse(processOne,
 results, err := each(ctx, items)
 ```
 
+### Wrap arrows with cross-cutting concerns; type signatures preserved
+
 ```go
-// Wrap an arrow with cross-cutting concerns. Type signature is preserved.
 robust := weft.Apply(myArrow,
     weft.WithRetry[In, Out](3, weft.ExponentialBackoff(time.Second)),
-    weft.WithTimeout[In, Out](30*time.Second),
+    weft.WithTimeout[In, Out](30 * time.Second),
     weft.WithTap[In, Out](logProgress),
 )
 ```
 
+### Lift an MCP tool into the arrow algebra
+
+```go
+client, _ := mcp.Connect(ctx, mustStdio("claude", "mcp", "serve"))
+defer client.Close()
+
+// MCP tool → typed weft.Arrow
+bash := mcp.Tool[map[string]any, string](client, "Bash")
+
+// Composes with everything else in the algebra
+robust := weft.Apply(bash,
+    weft.WithRetry[map[string]any, string](2, weft.ExponentialBackoff(time.Second)),
+    weft.WithTimeout[map[string]any, string](30 * time.Second),
+)
+
+out, err := robust(ctx, map[string]any{"command": "ls /tmp"})
+```
+
+### Run an agent loop with real Claude + real MCP tools
+
+```go
+client, _ := mcp.Connect(ctx, mustStdio("claude", "mcp", "serve"))
+defer client.Close()
+
+bash := mcp.Tool[map[string]any, string](client, "Bash")
+
+bashBinding := llm.ToolBinding{
+    Spec: llm.ToolSpec{
+        Name:        "Bash",
+        Description: "Run a shell command",
+        InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+    },
+    Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+        var m map[string]any
+        json.Unmarshal(args, &m)
+        return bash(ctx, m)
+    },
+}
+
+agent := llm.Loop(
+    llm.Claude("claude-sonnet-4-5-20250929"),
+    []llm.ToolBinding{bashBinding /*, readBinding, ... */},
+    llm.WithMaxIter(8),
+)
+
+// agent is just an Arrow[Prompt, Response]. Compose, retry, timeout
+// it, parallelize across many prompts — all the same machinery.
+resp, err := agent(ctx, llm.Prompt{
+    Messages: []llm.Message{llm.UserText("count Go files in this repo")},
+})
+fmt.Println(resp.Text())
+```
+
+A complete runnable version is in
+[`cmd/examples/agent/main.go`](./cmd/examples/agent/main.go). With a
+real `ANTHROPIC_API_KEY`:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+go run ./cmd/examples/agent "How many Go files are in this repo? Use any tools you need."
+```
+
+---
+
 ## Worked example: codegen across a directory
 
-The `codegen` package applies an LLM transformation across every file in
-a directory matching a glob pattern. It exercises the full composition
-story: pure Go stages, an LLM call wrapped in retry and timeout, bounded
-concurrency, atomic writes with dry-run support.
+The `codegen` package applies an LLM transformation across every file
+in a directory matching a glob pattern. It exercises the full
+composition story: pure stages, an LLM call wrapped in retry and
+timeout, bounded concurrency, atomic writes with dry-run support.
 
-Try it without an API key (uses a deterministic stub transformer):
+Without an API key (uses a deterministic stub transformer):
 
 ```bash
 mkdir -p /tmp/demo
@@ -117,14 +245,7 @@ go run ./examples/codegen-llm \
     -dry -offline
 ```
 
-Output:
-
-```
-~ foo.go — would change (... bytes diff)
-DRY RUN: 1 files (1 would change, 0 unchanged, 0 failed)
-```
-
-With a real Claude API key:
+With a real key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -137,7 +258,7 @@ go run ./examples/codegen-llm \
 
 ### How the layers stack
 
-The codegen example is composition all the way down:
+Codegen is composition all the way down:
 
 ```
 codegen.Pipeline(transformer, 4, weft.PartialResults)         ← top-level
@@ -149,62 +270,55 @@ codegen.Pipeline(transformer, 4, weft.PartialResults)         ← top-level
      )
 ```
 
-Every arrow at every layer has the same type. The codegen pipeline doesn't
-know it contains an LLM call. The LLM call doesn't know it's wrapped in
-retry. The retry doesn't know it's part of a parallel traversal. Each
-layer only sees its argument's type contract — that's the role-erasure.
+Every arrow at every layer has the same type. The codegen pipeline
+doesn't know it contains an LLM call. The LLM call doesn't know it's
+wrapped in retry. Each layer only sees its argument's type contract
+— that's the role-erasure.
 
-To swap providers, you change one stage:
+To swap providers, you change one line:
 
 ```go
 weft.Pipe3(formatPrompt, llm.Claude(model), parseResp)
 //                       ^^^^^^^^^^^^^^^^^
-// becomes:
-weft.Pipe3(formatPrompt, llm.OpenAI(model), parseResp)  // when implemented
+// becomes (when implemented):
+weft.Pipe3(formatPrompt, llm.OpenAI(model), parseResp)
 ```
 
-Nothing else changes.
+---
+
+## Examples in this repo
+
+| Command                          | What it does                                            |
+|----------------------------------|---------------------------------------------------------|
+| `cmd/examples/escalating`        | Haiku → Opus escalation when output looks low quality   |
+| `cmd/examples/pipeline`          | Multi-step typed LLM pipeline                           |
+| `cmd/examples/mcp-roundtrip`     | InMemory functor: lift in, lift out, verify identity    |
+| `cmd/examples/mcp-stdio`         | Spawn `claude mcp serve`, call its tools                |
+| `cmd/examples/agent`             | Full agent loop: real Claude + real MCP tools           |
+| `cmd/discover-mcp`               | Inspector for any MCP stdio server                      |
+| `cmd/multi-source-server`        | Compose two upstream MCP servers, expose as one         |
+| `cmd/test-multi-source`          | End-to-end verifier for the multi-source server         |
+
+The last two prove the framework's claims hold across three process
+boundaries and two heterogeneous external systems, with structured
+outputs flowing through cleanly.
+
+---
 
 ## Building and testing
 
 ```
-make            # build and test (default)
-make test       # run all 74 tests
+make            # build and test
+make test       # run all 96 tests
 make test-race  # run tests with the race detector
 make laws       # run only the categorical law tests (the spec)
-make example    # run the end-to-end codegen pipeline test
+make example    # run the codegen pipeline test
 make cover      # generate HTML coverage report
 make lint       # go vet + gofmt check
-make help       # list every target with descriptions
+make help       # list every target
 ```
 
-## Docker
-
-If you don't want to install Go locally, or you want a uniform environment
-that includes Claude Code and common MCP servers:
-
-```
-# CI-style: build a lean image, run the test suite, exit.
-make docker-ci
-
-# Dev-style: start a long-running container with Claude Code, MCP servers,
-# Node.js, and the full toolbox. Bind-mounts your source for live editing.
-make docker-dev
-make docker-shell           # open a shell inside it
-make docker-test            # run tests inside it
-docker compose exec dev claude mcp serve   # run Claude Code as an MCP server
-make docker-down            # stop everything
-```
-
-Set `ANTHROPIC_API_KEY` (and optionally `GITHUB_TOKEN`) in your shell or
-in a `.env` file next to `docker-compose.yml`. See `.env.example`.
-
-The dev image includes:
-- `golang:1.22-bookworm` as base
-- `make`, `git`, `curl`, `jq`, `ripgrep`, `vim`
-- Node.js + npm, Python 3
-- Claude Code (`@anthropic-ai/claude-code`)
-- MCP servers: `server-filesystem`, `server-github`, `server-memory`
+---
 
 ## What's in each package
 
@@ -227,6 +341,17 @@ The dev image includes:
 |-------------------|----------|
 | `types.go`        | `Prompt`, `Response`, `Message`, `Block`, `ToolSpec`, `Usage`, `ProviderExtras` |
 | `anthropic.go`    | `Claude(model, opts...) Arrow[Prompt, Response]` over the Anthropic Messages API |
+| `loop.go`         | `Loop(llm, bindings, opts...) Arrow[Prompt, Response]` — agent loop combinator |
+
+### `mcp/` — lift MCP tools in/out of the arrow algebra
+
+| File              | Provides |
+|-------------------|----------|
+| `client.go`       | `Client`, `Connect`, `Tool[In, Out]` (lift in: MCP tool → arrow) |
+| `server.go`       | `Server`, `Serve`, `ServeAsTool[In, Out]` (lift out: arrow → MCP tool) |
+| `stdio.go`        | `Stdio` transport for client side; wraps `mark3labs/mcp-go` |
+| `stdio_server.go` | `RunStdioServer` — expose a weft Server as a real MCP stdio server |
+| `mcp.go`          | `Transport`, `InMemory` for in-process round-trips |
 
 ### `codegen/` — directory-wide LLM transformations
 
@@ -234,40 +359,49 @@ The dev image includes:
 |-------------------|----------|
 | `codegen.go`      | `Pipeline`, `Enumerate`, `Apply`, `WriteOrDiff`, `Job`, `File`, `Edit`, `FileResult`, `Transformer` |
 
+---
+
 ## Design philosophy
 
 **No interfaces in the composition path.** Type information flows
-end-to-end through composition. `Arrow[A, B]` is a generic function type,
-not an interface. `Compose(f, g)` is type-checked at compile time —
-refactor an input or output type and the compiler tells you exactly which
-calls broke.
+end-to-end through composition. `Arrow[A, B]` is a generic function
+type, not an interface. `Compose(f, g)` is type-checked at compile
+time — refactor an input or output type and the compiler tells you
+exactly which calls broke.
 
 **Combinators encode laws, not features.** Every combinator corresponds
 to a categorical primitive: identity, sequential composition, product,
-coproduct, functor map. The laws those primitives satisfy are tested as
-the package's spec, not as an afterthought.
+coproduct, functor map. The laws those primitives satisfy are tested
+as the package's spec, not as an afterthought.
 
 **Erasure is contained at boundaries.** When erasure is unavoidable
-(e.g., LLM tool dispatch over JSON, MCP wire format), it lives in a
-single function that wraps a typed arrow into an erased shape. The
-original arrow stays usable, fully typed, in the rest of the program.
+(LLM tool dispatch over JSON, MCP wire format), it lives in a single
+function that wraps a typed arrow into an erased shape. The original
+arrow stays usable, fully typed, in the rest of the program.
 
-For a longer discussion, including comparison tables against LangChain
-and other frameworks, see [API.md](./API.md).
+**`mark3labs/mcp-go` does the wire protocol.** weft does the algebra.
+The two are layered, not competing. mcp-go's reliability and ecosystem
+become weft's reliability and ecosystem.
+
+---
 
 ## A note on the LLM seam
 
-The Claude arrow has been tested against a mock Anthropic server that
-mirrors the documented API shape. It has not been exercised against the
-real API in this repo's CI. The first time you run it with a real key,
-the most likely failure modes are:
+The Claude arrow has been tested extensively against a mock Anthropic
+server that mirrors the documented API shape, and exercised live via
+`cmd/examples/agent` against the real Anthropic API. If you run into
+trouble, the most likely failure modes are:
 
-- The default model name (`claude-opus-4-5`); update to current per
+- The default `anthropic-version` header (`2023-06-01`); configurable
+  via `llm.WithAPIVersion`.
+- The model name in your code; pick one from
   [Anthropic's docs](https://docs.claude.com/en/docs/about-claude/models).
-- The `anthropic-version` header value (`2023-06-01` is the default;
-  configurable via `llm.WithAPIVersion`).
 
-Both are one-line changes if needed.
+The Claude Desktop integration was verified end-to-end: a weft server
+registered in `claude_desktop_config.json` is callable from real Claude
+conversations.
+
+---
 
 ## A note on naming
 
@@ -277,11 +411,12 @@ heterogeneous arrows woven together into composable pipelines.
 
 There are unrelated projects also named "weft" — notably
 [WeaveMindAI/weft](https://github.com/WeaveMindAI/weft) (a Rust-based
-visual programming language for AI workflows) and
+visual programming language) and
 [hyperledger-labs/weft](https://github.com/hyperledger-labs/weft) (a
-Hyperledger Fabric CLI). This project is a Go library for arrow-based
-composition; the import path `github.com/vinodhalaharvi/weft` makes the
-distinction unambiguous.
+Hyperledger Fabric CLI). This project is a Go library; the import path
+`github.com/vinodhalaharvi/weft` makes the distinction unambiguous.
+
+---
 
 ## License
 
