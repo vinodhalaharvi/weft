@@ -270,15 +270,6 @@ func extractTextContent(r *mcpgo.CallToolResult) string {
 	for _, c := range r.Content {
 		if tc, ok := c.(mcpgo.TextContent); ok {
 			parts = append(parts, tc.Text)
-			continue
-		}
-		// Some servers return content as map[string]any when the
-		// transport couldn't preserve type info during unmarshaling.
-		// Fall back to extracting the "text" field if present.
-		if m, ok := c.(map[string]any); ok {
-			if t, ok := m["text"].(string); ok {
-				parts = append(parts, t)
-			}
 		}
 	}
 	return strings.Join(parts, "\n")
