@@ -25,12 +25,17 @@ package mcp
 // 1. Output translation. Real MCP servers return tool results as a list
 //    of typed content blocks (TextContent, ImageContent, ...). Our
 //    mcp.Tool[In, Out] expects to json.Unmarshal a single value into Out.
-//    The stdio transport extracts text from the first text-content
-//    block and:
-//      - if that text is itself valid JSON, passes it through verbatim
-//        (so Tool[..., SomeStruct] works for tools that return JSON)
-//      - otherwise wraps it as a JSON-quoted string (so
-//        Tool[..., string] works for tools returning prose)
+//    The stdio transport concatenates text from text-content blocks and
+//    always returns it as a JSON string. Callers use Tool[..., string]
+//    to receive the raw text, then json.Unmarshal it themselves if the
+//    text happens to be JSON they want to decode into a struct.
+//
+//    This is deliberately simple: a previous version tried to detect
+//    JSON output and pass it through directly, but that forced callers
+//    to know in advance whether a tool's output was valid JSON and to
+//    pick a matching Out type. The leaky heuristic produced confusing
+//    decode errors. Treating output as opaque text is honest and lets
+//    callers decide the parsing strategy.
 //
 // 2. Initialize is performed automatically inside Stdio() when the
 //    transport opens. If your MCP server needs custom client capabilities
@@ -208,16 +213,17 @@ func (t *stdioTransport) Roundtrip(ctx context.Context, req Request) (Response, 
 		// via IsError, propagate that.
 		text := extractTextContent(out)
 
-		// Decide how to encode the text into our envelope.
-		// If it's valid JSON, pass through unchanged so callers can
-		// decode it directly into structured types. Otherwise, encode
-		// as a JSON string so Tool[..., string] gets the raw text.
-		var contentRaw json.RawMessage
-		if json.Valid([]byte(text)) {
-			contentRaw = json.RawMessage(text)
-		} else {
-			b, _ := json.Marshal(text)
-			contentRaw = b
+		// Always encode the text as a JSON string. Callers receive
+		// the raw text and can json.Unmarshal it themselves if they
+		// want structured data. The previous "pass JSON through
+		// unchanged" heuristic was leaky — it forced callers to know
+		// in advance whether a tool's output was valid JSON, and
+		// picking the wrong Out type produced confusing decode errors.
+		// Treating tool output as opaque text uniformly is simpler
+		// and lets the caller decide the parsing strategy.
+		contentRaw, err := json.Marshal(text)
+		if err != nil {
+			return Response{}, fmt.Errorf("encode tool output text: %w", err)
 		}
 
 		ourResult := CallToolResult{
