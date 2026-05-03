@@ -59,6 +59,15 @@ func main() {
 		logger.Fatalf("mkdir tmp: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
+
+	// Resolve symlinks so the path matches what server-filesystem
+	// canonicalizes internally. On macOS /tmp is a symlink to
+	// /private/tmp; without this resolution the filesystem server
+	// rejects paths under /tmp because they're "outside" its
+	// (canonicalized) allowed directory.
+	if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil {
+		tmpDir = resolved
+	}
 	logger.Printf("scratch dir: %s", tmpDir)
 
 	transport, err := mcp.Stdio("go", "run",

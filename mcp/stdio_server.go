@@ -136,11 +136,25 @@ func buildHandler(entry ErasedTool) mcpgoserver.ToolHandlerFunc {
 			return mcpgo.NewToolResultError(err.Error()), nil
 		}
 
-		// out is whatever the arrow returned, marshaled to JSON by
-		// ServeAsTool. For the wire, we hand it back as a text block
-		// containing that JSON. Clients that expect structured data
-		// will json.Unmarshal the text. Clients that expect prose
-		// will see the JSON-encoded value as a quoted string.
+		// out is a json.RawMessage from ServeAsTool — JSON-encoded
+		// representation of whatever the arrow returned. The wire
+		// expects text content, so we need to render it as a string.
+		//
+		// If the arrow's output type was Go's `string`, ServeAsTool
+		// wrapped it as a JSON string like `"hello"`. We need to
+		// unwrap that so the text content is `hello`, not `"hello"`.
+		// Otherwise downstream MCP clients see escaped quotes around
+		// every text result.
+		//
+		// For structured outputs (struct, map, slice) the JSON form
+		// IS the text we want to send — pass it through verbatim.
+		var asString string
+		if err := json.Unmarshal(out, &asString); err == nil {
+			// Successfully decoded as a JSON string → pass the
+			// unwrapped text.
+			return mcpgo.NewToolResultText(asString), nil
+		}
+		// Not a JSON-encoded string → pass the raw JSON as text.
 		return mcpgo.NewToolResultText(string(out)), nil
 	}
 }
