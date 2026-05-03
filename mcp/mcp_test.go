@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/vinodhalaharvi/weft/mcp"
@@ -232,9 +233,12 @@ func TestTool_ComposesWithWeftCombinators(t *testing.T) {
 	greet := mcp.Tool[GreetIn, GreetOut](client, "greet")
 
 	// Wrap with a tap to verify composition with transforms.
-	calls := 0
+	// The tap fires once per item from concurrent goroutines, so the
+	// counter MUST be synchronized — atomic.Int32 is the simplest fit.
+	// (Plain int++ here is a textbook race; the race detector flags it.)
+	var calls atomic.Int32
 	greet = weft.WithTap[GreetIn, GreetOut](func(_ GreetIn, _ GreetOut, _ error) {
-		calls++
+		calls.Add(1)
 	})(greet)
 
 	// Run via Traverse over 10 items.
@@ -256,8 +260,8 @@ func TestTool_ComposesWithWeftCombinators(t *testing.T) {
 			t.Errorf("[%d] got %q, want %q", i, r.Message, want)
 		}
 	}
-	if calls != len(inputs) {
-		t.Errorf("tap fired %d times, want %d", calls, len(inputs))
+	if got := int(calls.Load()); got != len(inputs) {
+		t.Errorf("tap fired %d times, want %d", got, len(inputs))
 	}
 }
 
